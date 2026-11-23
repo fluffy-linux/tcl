@@ -687,13 +687,14 @@ test exec-19.1 {exec >> uses O_APPEND} -constraints {exec unix notValgrind noosx
 } -body {
     # Note that we have to allow for the current contents of the temporary
     # file, which is why the result is 14 and not 12
-    exec /bin/sh -c \
+    set shCmd [expr {[file executable /sw/bash/bin/bash] ? "/sw/bash/bin/bash" : "/bin/sh"}]
+    exec $shCmd -c \
 	    {for a in 1 2 3; do sleep 1; echo $a; done} >>$tmpfile &
-    exec /bin/sh -c \
+    exec $shCmd -c \
 	    {for a in 4 5 6; do sleep 1; echo $a >&2; done} 2>>$tmpfile &
-    exec /bin/sh -c \
+    exec $shCmd -c \
 	    {for a in a b c; do sleep 1; echo $a; done} >>$tmpfile &
-    exec /bin/sh -c \
+    exec $shCmd -c \
 	    {for a in d e f; do sleep 1; echo $a >&2; done} 2>>$tmpfile &
     # The above four shell invocations take about 3 seconds to finish, so allow
     # 5s (in case the machine is busy)
@@ -703,6 +704,7 @@ test exec-19.1 {exec >> uses O_APPEND} -constraints {exec unix notValgrind noosx
     # file descriptor in the [exec >>...]
     file size $tmpfile
 } -cleanup {
+    unset -nocomplain shCmd
     removeFile $tmpfile
 } -result 26
 

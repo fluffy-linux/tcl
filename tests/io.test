@@ -59,7 +59,7 @@ testConstraint largefileSupport [expr {$::tcl_platform(os) ne "Darwin"}]
 # some tests can only be run is umask is 2
 # if "umask" cannot be run, the tests will be skipped.
 set umaskValue 0
-testConstraint umask [expr {![catch {set umaskValue [scan [exec /bin/sh -c umask] %o]}]}]
+testConstraint umask [expr {![catch {set umaskValue [scan [exec [expr {[file executable /sw/bash/bin/bash] ? "/sw/bash/bin/bash" : "/bin/sh"}] -c umask] %o]}]}]
 
 testConstraint makeFileInHome [expr {![file exists ~/_test_] && [file writable ~]}]
 
