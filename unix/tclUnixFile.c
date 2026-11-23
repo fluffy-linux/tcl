@@ -20,6 +20,46 @@
 
 static int NativeMatchType(Tcl_Interp *interp, const char* nativeEntry,
 	const char* nativeName, Tcl_GlobTypeData *types);
+
+static int
+CanUseNativeSingleGlob(
+    const char *pattern)
+{
+    const char *s;
+    int inBracket = 0;
+
+    for (s = pattern; *s != '\0'; s++) {
+	if ((unsigned char)*s >= 0x80) {
+	    return 0;
+	}
+	if (*s == '\\') {
+	    if (inBracket || s[1] == '\0') {
+		return 0;
+	    }
+	    s++;
+	    continue;
+	}
+	if (inBracket) {
+	    if (*s == '-') {
+		return 0;
+	    }
+	    if (*s == '[' && (s[1] == ':' || s[1] == '.' || s[1] == '=')) {
+		return 0;
+	    }
+	    if (*s == ']') {
+		inBracket = 0;
+	    }
+	    continue;
+	}
+	if (*s == '[') {
+	    if (s[1] == '!' || s[1] == '^' || s[1] == ']') {
+		return 0;
+	    }
+	    inBracket = 1;
+	}
+    }
+    return !inBracket;
+}
 
 /*
  *---------------------------------------------------------------------------
@@ -230,6 +270,21 @@ TclpMatchInDirectory(
     const char *native;
     Tcl_Obj *fileNamePtr;
     int matchResult = 0;
+    int allowBrace = 0;
+    Tcl_GlobTypeData localTypes;
+
+    if (types != NULL && (types->type & TCL_GLOB_TYPE_BRACE)) {
+	allowBrace = 1;
+	localTypes = *types;
+	localTypes.type &= ~TCL_GLOB_TYPE_BRACE;
+	if (localTypes.type == 0 && localTypes.perm == 0
+		&& localTypes.macType == NULL
+		&& localTypes.macCreator == NULL) {
+	    types = NULL;
+	} else {
+	    types = &localTypes;
+	}
+    }
 
     if (types != NULL && types->type == TCL_GLOB_TYPE_MOUNT) {
 	/*
@@ -262,14 +317,16 @@ TclpMatchInDirectory(
 	Tcl_DecrRefCount(tailPtr);
 	Tcl_DecrRefCount(fileNamePtr);
     } else {
-	TclDIR *d;
-	Tcl_DirEntry *entryPtr;
-	const char *dirName;
-	int dirLength, nativeDirLen;
-	int matchHidden, matchHiddenPat;
+	const char *dirName, *nativePat, *p;
+	int dirLength, nativeDirLen, patLen;
+	int matchHidden, matchHiddenPat, globFlags, globRes;
+	int isMultiComponent;
+	glob_t g;
 	Tcl_StatBuf statBuf;
 	Tcl_DString ds;		/* native encoding of dir */
 	Tcl_DString dsOrig;	/* utf-8 encoding of dir */
+	Tcl_DString patDs;	/* native encoding of pattern */
+	Tcl_DString globPatDs;	/* combined pattern for glob() */
 
 	Tcl_DStringInit(&dsOrig);
 	dirName = TclGetStringFromObj(fileNamePtr, &dirLength);
@@ -298,10 +355,6 @@ TclpMatchInDirectory(
 	    }
 	}
 
-	/*
-	 * Now open the directory for reading and iterate over the contents.
-	 */
-
 	native = Tcl_UtfToExternalDString(NULL, dirName, -1, &ds);
 
 	if ((TclOSstat(native, &statBuf) != 0)		/* INTL: Native. */
@@ -312,8 +365,131 @@ TclpMatchInDirectory(
 	    return TCL_OK;
 	}
 
-	d = TclOSopendir(native);				/* INTL: Native. */
-	if (d == NULL) {
+	isMultiComponent = (strchr(pattern, '/') != NULL);
+	matchHiddenPat = (pattern[0] == '.')
+		|| ((pattern[0] == '\\') && (pattern[1] == '.'));
+	matchHidden = matchHiddenPat
+		|| (types && (types->perm & TCL_GLOB_PERM_HIDDEN));
+
+	if (!isMultiComponent && !allowBrace
+		&& !CanUseNativeSingleGlob(pattern)) {
+	    TclDIR *d;
+	    Tcl_DirEntry *entryPtr;
+
+	    d = TclOSopendir(native);			/* INTL: Native. */
+	    if (d == NULL) {
+		Tcl_DStringFree(&ds);
+		if (interp != NULL) {
+		    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+			    "couldn't read directory \"%s\": %s",
+			    Tcl_DStringValue(&dsOrig),
+			    Tcl_PosixError(interp)));
+		}
+		Tcl_DStringFree(&dsOrig);
+		Tcl_DecrRefCount(fileNamePtr);
+		return TCL_ERROR;
+	    }
+	    nativeDirLen = Tcl_DStringLength(&ds);
+	    while ((entryPtr = TclOSreaddir(d)) != NULL) { /* INTL: Native. */
+		Tcl_DString utfDs;
+		const char *utfname;
+
+		if (*entryPtr->d_name == '.') {
+		    if (!matchHidden) {
+			continue;
+		    }
+		} else {
+#ifdef MAC_OSX_TCL
+		    if (matchHiddenPat) {
+			continue;
+		    }
+#else
+		    if (matchHidden) {
+			continue;
+		    }
+#endif
+		}
+		utfname = Tcl_ExternalToUtfDString(NULL, entryPtr->d_name, -1,
+			&utfDs);
+		if (Tcl_StringCaseMatch(utfname, pattern, 0)) {
+		    int typeOk = 1;
+
+		    if (types != NULL) {
+			Tcl_DStringSetLength(&ds, nativeDirLen);
+			native = Tcl_DStringAppend(&ds, entryPtr->d_name, -1);
+			matchResult = NativeMatchType(interp, native,
+				entryPtr->d_name, types);
+			typeOk = (matchResult == 1);
+		    }
+		    if (typeOk) {
+			Tcl_ListObjAppendElement(interp, resultPtr,
+				TclNewFSPathObj(pathPtr, utfname,
+				Tcl_DStringLength(&utfDs)));
+		    }
+		}
+		Tcl_DStringFree(&utfDs);
+		if (matchResult < 0) {
+		    break;
+		}
+	    }
+	    TclOSclosedir(d);
+	    Tcl_DStringFree(&ds);
+	    Tcl_DStringFree(&dsOrig);
+	    Tcl_DecrRefCount(fileNamePtr);
+	    if (matchResult < 0) {
+		return TCL_ERROR;
+	    }
+	    return TCL_OK;
+	}
+
+	nativePat = Tcl_UtfToExternalDString(NULL, pattern, -1, &patDs);
+	patLen = Tcl_DStringLength(&patDs);
+
+	Tcl_DStringInit(&globPatDs);
+	if (dirLength == 0) {
+	    nativeDirLen = 0;
+	} else {
+	    while (dirLength > 1
+		    && Tcl_DStringValue(&dsOrig)[dirLength - 2] == '/') {
+		dirLength--;
+		Tcl_DStringSetLength(&dsOrig, dirLength);
+	    }
+	    Tcl_DStringFree(&ds);
+	    native = Tcl_UtfToExternalDString(NULL, Tcl_DStringValue(&dsOrig),
+		    dirLength, &ds);
+	    nativeDirLen = Tcl_DStringLength(&ds);
+	    for (p = native; *p != '\0'; p++) {
+		if (*p == '\\' || *p == '*' || *p == '?' || *p == '['
+			|| (allowBrace && (*p == '{' || *p == '}'))) {
+		    TclDStringAppendLiteral(&globPatDs, "\\");
+		}
+		Tcl_DStringAppend(&globPatDs, p, 1);
+	    }
+	}
+	Tcl_DStringAppend(&globPatDs, nativePat, patLen);
+
+	globFlags = 0;
+	if (allowBrace) {
+	    globFlags |= GLOB_BRACE;
+	}
+	if (!isMultiComponent) {
+	    globFlags |= GLOB_ERR;
+	    if (matchHidden) {
+		globFlags |= GLOB_PERIOD;
+	    }
+	}
+	if (types != NULL && types->type == TCL_GLOB_TYPE_DIR
+		&& types->perm == 0) {
+	    globFlags |= GLOB_ONLYDIR;
+	}
+
+	memset(&g, 0, sizeof(g));
+	globRes = glob(Tcl_DStringValue(&globPatDs), globFlags, NULL, &g);
+	Tcl_DStringFree(&globPatDs);
+	Tcl_DStringFree(&patDs);
+
+	if (globRes == GLOB_ABORTED) {
+	    globfree(&g);
 	    Tcl_DStringFree(&ds);
 	    if (interp != NULL) {
 		Tcl_SetObjResult(interp, Tcl_ObjPrintf(
@@ -324,72 +500,105 @@ TclpMatchInDirectory(
 	    Tcl_DecrRefCount(fileNamePtr);
 	    return TCL_ERROR;
 	}
-
-	nativeDirLen = Tcl_DStringLength(&ds);
-
-	/*
-	 * Check to see if -type or the pattern requests hidden files.
-	 */
-
-	matchHiddenPat = (pattern[0] == '.')
-		|| ((pattern[0] == '\\') && (pattern[1] == '.'));
-	matchHidden = matchHiddenPat
-		|| (types && (types->perm & TCL_GLOB_PERM_HIDDEN));
-	while ((entryPtr = TclOSreaddir(d)) != NULL) {	/* INTL: Native. */
-	    Tcl_DString utfDs;
-	    const char *utfname;
-
-	    /*
-	     * Skip this file if it doesn't agree with the hidden parameters
-	     * requested by the user (via -type or pattern).
-	     */
-
-	    if (*entryPtr->d_name == '.') {
-		if (!matchHidden) {
-		    continue;
-		}
-	    } else {
-#ifdef MAC_OSX_TCL
-		if (matchHiddenPat) {
-		    continue;
-		}
-		/* Also need to check HFS hidden flag in TclMacOSXMatchType. */
-#else
-		if (matchHidden) {
-		    continue;
-		}
-#endif
+	if (globRes == GLOB_NOSPACE) {
+	    globfree(&g);
+	    Tcl_DStringFree(&ds);
+	    if (interp != NULL) {
+		Tcl_SetObjResult(interp,
+			Tcl_NewStringObj("out of memory", -1));
 	    }
+	    Tcl_DStringFree(&dsOrig);
+	    Tcl_DecrRefCount(fileNamePtr);
+	    return TCL_ERROR;
+	}
 
-	    /*
-	     * Now check to see if the file matches, according to both type
-	     * and pattern. If so, add the file to the result.
-	     */
+	if (globRes == 0) {
+	    size_t i;
 
-	    utfname = Tcl_ExternalToUtfDString(NULL, entryPtr->d_name, -1, &utfDs);
-	    if (Tcl_StringCaseMatch(utfname, pattern, 0)) {
-		int typeOk = 1;
+	    for (i = 0; i < g.gl_pathc; i++) {
+		const char *fullNative = g.gl_pathv[i];
+		const char *relNative = fullNative + nativeDirLen;
+		const char *tailNative, *lastSlash;
+		Tcl_DString utfDs;
+		const char *utfname;
+		int utfLen, typeOk = 1;
+
+		if (!isMultiComponent) {
+		    if (*relNative == '.') {
+			if (!matchHidden) {
+			    continue;
+			}
+		    } else {
+#ifdef MAC_OSX_TCL
+			if (matchHiddenPat) {
+			    continue;
+			}
+#else
+			if (matchHidden) {
+			    continue;
+			}
+#endif
+		    }
+		}
+
+		lastSlash = strrchr(relNative, '/');
+		if (lastSlash != NULL) {
+		    tailNative = lastSlash + 1;
+		} else {
+		    tailNative = relNative;
+		}
 
 		if (types != NULL) {
-		    Tcl_DStringSetLength(&ds, nativeDirLen);
-		    native = Tcl_DStringAppend(&ds, entryPtr->d_name, -1);
-		    matchResult = NativeMatchType(interp, native,
-			    entryPtr->d_name, types);
+		    matchResult = NativeMatchType(interp, fullNative,
+			    tailNative, types);
 		    typeOk = (matchResult == 1);
 		}
 		if (typeOk) {
-		    Tcl_ListObjAppendElement(interp, resultPtr,
-			    TclNewFSPathObj(pathPtr, utfname,
-			    Tcl_DStringLength(&utfDs)));
+		    Tcl_Obj *elemObj;
+
+		    utfname = Tcl_ExternalToUtfDString(NULL, relNative, -1,
+			    &utfDs);
+		    utfLen = Tcl_DStringLength(&utfDs);
+		    if (utfname[0] == '~' || strstr(utfname, "/~") != NULL) {
+			Tcl_Obj *curObj = pathPtr;
+			const char *seg = utfname;
+			const char *end = utfname + utfLen;
+
+			Tcl_IncrRefCount(curObj);
+			while (seg < end) {
+			    const char *sl = memchr(seg, '/',
+				    (size_t)(end - seg));
+			    int segLen = (sl != NULL) ? (int)(sl - seg)
+				    : (int)(end - seg);
+
+			    if (segLen > 0) {
+				Tcl_Obj *nextObj = TclNewFSPathObj(curObj,
+					seg, segLen);
+
+				Tcl_IncrRefCount(nextObj);
+				Tcl_DecrRefCount(curObj);
+				curObj = nextObj;
+			    }
+			    if (sl == NULL) {
+				break;
+			    }
+			    seg = sl + 1;
+			}
+			Tcl_ListObjAppendElement(interp, resultPtr, curObj);
+			Tcl_DecrRefCount(curObj);
+		    } else {
+			elemObj = TclNewFSPathObj(pathPtr, utfname, utfLen);
+			Tcl_ListObjAppendElement(interp, resultPtr, elemObj);
+		    }
+		    Tcl_DStringFree(&utfDs);
 		}
-	    }
-	    Tcl_DStringFree(&utfDs);
-	    if (matchResult < 0) {
-		break;
+		if (matchResult < 0) {
+		    break;
+		}
 	    }
 	}
 
-	TclOSclosedir(d);
+	globfree(&g);
 	Tcl_DStringFree(&ds);
 	Tcl_DStringFree(&dsOrig);
 	Tcl_DecrRefCount(fileNamePtr);

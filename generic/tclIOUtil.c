@@ -677,6 +677,161 @@ TclFSEpoch(void)
     return tsdPtr->filesystemEpoch;
 }
 
+int
+TclFSPatternIsNative(
+    Tcl_Obj *pathPtr,
+    const char *pattern)
+{
+    FilesystemRecord *fsRecPtr = FsGetFirstFilesystem();
+    Tcl_Obj *baseObj = pathPtr;
+    Tcl_Obj *cwdObj = NULL;
+    Tcl_Obj *normObj;
+    Tcl_DString effDs;
+    const char *baseStr, *effStr;
+    int baseLen, effLen;
+    int isNative = 1;
+
+    if (fsRecPtr == NULL) {
+	return 0;
+    }
+    if (pattern != NULL && (pattern[0] == '/' || pattern[0] == '~')) {
+	return 0;
+    }
+    if (fsRecPtr->fsPtr == &tclNativeFilesystem && fsRecPtr->nextPtr == NULL) {
+	if (pathPtr == NULL) {
+	    return TclFSCwdIsNative();
+	}
+	baseStr = TclGetString(pathPtr);
+	return !(baseStr[0] == '/' && baseStr[1] == '/');
+    }
+
+    if (pathPtr == NULL && pattern != NULL && strchr(pattern, ':') != NULL) {
+	return 0;
+    }
+
+    for (; fsRecPtr != NULL; fsRecPtr = fsRecPtr->nextPtr) {
+	if (fsRecPtr->fsPtr != &tclNativeFilesystem
+		&& fsRecPtr->fsPtr->listVolumesProc == NULL) {
+	    return 0;
+	}
+    }
+
+    if (baseObj == NULL) {
+	if (!TclFSCwdIsNative()) {
+	    return 0;
+	}
+	cwdObj = Tcl_FSGetCwd(NULL);
+	if (cwdObj == NULL) {
+	    return 0;
+	}
+	baseObj = cwdObj;
+    }
+
+    if (Tcl_FSGetFileSystemForPath(baseObj) != &tclNativeFilesystem) {
+	if (cwdObj != NULL) {
+	    Tcl_DecrRefCount(cwdObj);
+	}
+	return 0;
+    }
+
+    normObj = Tcl_FSGetNormalizedPath(NULL, baseObj);
+    if (normObj == NULL) {
+	if (cwdObj != NULL) {
+	    Tcl_DecrRefCount(cwdObj);
+	}
+	return 0;
+    }
+    baseStr = TclGetStringFromObj(normObj, &baseLen);
+    if (baseLen <= 0 || baseStr[0] != '/' || baseStr[1] == '/') {
+	if (cwdObj != NULL) {
+	    Tcl_DecrRefCount(cwdObj);
+	}
+	return 0;
+    }
+    while (baseLen > 1 && baseStr[baseLen - 1] == '/') {
+	baseLen--;
+    }
+
+    Tcl_DStringInit(&effDs);
+    Tcl_DStringAppend(&effDs, baseStr, baseLen);
+    if (pattern != NULL) {
+	const char *s = pattern;
+	const char *lastSlash = NULL;
+
+	while (*s != '\0' && *s != '*' && *s != '?' && *s != '['
+		&& *s != '{' && *s != '}' && *s != '\\' && *s != '~') {
+	    if (*s == '/') {
+		lastSlash = s;
+	    }
+	    s++;
+	}
+	if (lastSlash != NULL && lastSlash > pattern) {
+	    if (Tcl_DStringLength(&effDs) > 1) {
+		Tcl_DStringAppend(&effDs, "/", 1);
+	    }
+	    Tcl_DStringAppend(&effDs, pattern, (int) (lastSlash - pattern));
+	}
+    }
+    effStr = Tcl_DStringValue(&effDs);
+    effLen = Tcl_DStringLength(&effDs);
+    while (effLen > 1 && effStr[effLen - 1] == '/') {
+	effLen--;
+    }
+
+    fsRecPtr = FsGetFirstFilesystem();
+    Claim();
+    while (fsRecPtr != NULL && isNative) {
+	if (fsRecPtr->fsPtr != &tclNativeFilesystem
+		&& fsRecPtr->fsPtr->listVolumesProc != NULL) {
+	    Tcl_Obj *vols = fsRecPtr->fsPtr->listVolumesProc();
+
+	    if (vols != NULL) {
+		int objc, i;
+		Tcl_Obj **objv;
+
+		if (TclListObjGetElements(NULL, vols, &objc, &objv) != TCL_OK) {
+		    isNative = 0;
+		} else {
+		    for (i = 0; i < objc; i++) {
+			int vlen;
+			const char *vstr = TclGetStringFromObj(objv[i], &vlen);
+			int minLen;
+
+			while (vlen > 1 && vstr[vlen - 1] == '/') {
+			    vlen--;
+			}
+			if (vlen <= 0 || vstr[0] != '/') {
+			    continue;
+			}
+			if (effLen == 1 || vlen == 1) {
+			    isNative = 0;
+			    break;
+			}
+			minLen = (effLen < vlen) ? effLen : vlen;
+			if (strncmp(effStr, vstr, (size_t) minLen) == 0
+				&& (minLen == effLen
+				    || effStr[minLen] == '/')
+				&& (minLen == vlen
+				    || vstr[minLen] == '/')) {
+			    isNative = 0;
+			    break;
+			}
+		    }
+		}
+		Tcl_DecrRefCount(vols);
+	    }
+	}
+	fsRecPtr = fsRecPtr->nextPtr;
+    }
+    Disclaim();
+    Tcl_DStringFree(&effDs);
+
+    if (cwdObj != NULL) {
+	Tcl_DecrRefCount(cwdObj);
+    }
+    return isNative;
+}
+
 
 /*
  * If non-NULL, clientData is owned by us and must be freed later.
