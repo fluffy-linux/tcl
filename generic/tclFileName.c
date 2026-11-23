@@ -2064,6 +2064,112 @@ TclGlob(
  */
 
 static int
+CanUseNativeMultiGlob(
+    const char *pattern,
+    int *hasBracePtr)
+{
+    const char *s;
+    int atStart = 1;
+    int inBrace = 0;
+    int inBracket = 0;
+    int braceAltStart = 0;
+    int braceCommas = 0;
+
+    *hasBracePtr = 0;
+    if (*pattern == '\0') {
+	return 0;
+    }
+    for (s = pattern; *s != '\0'; s++) {
+	if ((unsigned char)*s >= 0x80) {
+	    return 0;
+	}
+	if (atStart) {
+	    if (*s == '.' || *s == '~'
+		    || (*s == '\\' && (s[1] == '.' || s[1] == '~'))) {
+		return 0;
+	    }
+	    if (*s != '{') {
+		atStart = 0;
+	    }
+	}
+	if (braceAltStart) {
+	    if (*s == '}' || *s == ',' || *s == '/'
+		    || *s == '.' || *s == '~'
+		    || (*s == '\\' && (s[1] == '.' || s[1] == '~'))) {
+		return 0;
+	    }
+	    braceAltStart = 0;
+	}
+	if (*s == '\\') {
+	    if (inBracket || s[1] == '\0' || s[1] == '/') {
+		return 0;
+	    }
+	    atStart = 0;
+	    s++;
+	    continue;
+	}
+	if (inBracket) {
+	    if (*s == '{' || *s == '}' || *s == '/' || *s == '-') {
+		return 0;
+	    }
+	    if (*s == '[' && (s[1] == ':' || s[1] == '.' || s[1] == '=')) {
+		return 0;
+	    }
+	    if (*s == ']') {
+		inBracket = 0;
+	    }
+	    continue;
+	}
+	if (*s == '[') {
+	    if (inBrace) {
+		return 0;
+	    }
+	    if (s[1] == '!' || s[1] == '^' || s[1] == ']') {
+		return 0;
+	    }
+	    inBracket = 1;
+	    continue;
+	}
+	if (*s == '{') {
+	    if (inBrace) {
+		return 0;
+	    }
+	    inBrace = 1;
+	    braceAltStart = 1;
+	    braceCommas = 0;
+	    *hasBracePtr = 1;
+	    continue;
+	}
+	if (*s == ',') {
+	    if (inBrace) {
+		braceCommas++;
+		braceAltStart = 1;
+	    }
+	    continue;
+	}
+	if (*s == '}') {
+	    if (!inBrace || braceCommas == 0) {
+		return 0;
+	    }
+	    inBrace = 0;
+	    atStart = 0;
+	    continue;
+	}
+	if (*s == '/') {
+	    if (s[1] == '\0' || s[1] == '/'
+		    || (inBrace && (s[1] == ',' || s[1] == '}'))) {
+		return 0;
+	    }
+	    atStart = 1;
+	}
+    }
+    if (inBrace || inBracket) {
+	return 0;
+    }
+    return 1;
+}
+
+static int
 SkipToChar(
     char **stringPtr,		/* Pointer string to check. */
     int match)			/* Character to find. */
@@ -2230,6 +2336,23 @@ DoGlob(
     if (openBrace != NULL) {
 	char *element;
 	Tcl_DString newName;
+	int hasBrace = 0;
+
+	if (tclPlatform == TCL_PLATFORM_UNIX
+		&& (types == NULL || (types->perm & TCL_GLOB_PERM_HIDDEN) == 0)
+		&& CanUseNativeMultiGlob(pattern, &hasBrace)
+		&& TclFSPatternIsNative(pathPtr, pattern)) {
+	    Tcl_GlobTypeData braceTypes;
+
+	    if (types != NULL) {
+		braceTypes = *types;
+	    } else {
+		memset(&braceTypes, 0, sizeof(braceTypes));
+	    }
+	    braceTypes.type |= TCL_GLOB_TYPE_BRACE;
+	    return Tcl_FSMatchInDirectory(interp, matchesObj, pathPtr,
+		    pattern, &braceTypes);
+	}
 
 	Tcl_DStringInit(&newName);
 
@@ -2305,10 +2428,30 @@ DoGlob(
 	};
 	char save = *p;
 	Tcl_Obj *subdirsPtr;
+	int hasBrace = 0;
 
 	if (*p == '\0') {
 	    return Tcl_FSMatchInDirectory(interp, matchesObj, pathPtr,
 		    pattern, types);
+	}
+	if (tclPlatform == TCL_PLATFORM_UNIX
+		&& (types == NULL || (types->perm & TCL_GLOB_PERM_HIDDEN) == 0)
+		&& CanUseNativeMultiGlob(pattern, &hasBrace)
+		&& TclFSPatternIsNative(pathPtr, pattern)) {
+	    Tcl_GlobTypeData braceTypes;
+	    Tcl_GlobTypeData *callTypes = types;
+
+	    if (hasBrace) {
+		if (types != NULL) {
+		    braceTypes = *types;
+		} else {
+		    memset(&braceTypes, 0, sizeof(braceTypes));
+		}
+		braceTypes.type |= TCL_GLOB_TYPE_BRACE;
+		callTypes = &braceTypes;
+	    }
+	    return Tcl_FSMatchInDirectory(interp, matchesObj, pathPtr,
+		    pattern, callTypes);
 	}
 
 	/*

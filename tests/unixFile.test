@@ -18,6 +18,8 @@ if {"::tcltest" ni [namespace children]} {
 catch [list package require -exact Tcltest [info patchlevel]]
 
 testConstraint testfindexecutable [llength [info commands testfindexecutable]]
+testConstraint testsimplefilesystem [llength [info commands testsimplefilesystem]]
+testConstraint testfilesystem [llength [info commands testfilesystem]]
 
 set oldpwd [pwd]
 cd [temporaryDirectory]
@@ -93,6 +95,94 @@ test unixFile-1.9 {auto_execok wildcard PATH} -constraints {unix} -setup {
     auto_reset
     file delete -force wsw
 } -result [list {} [list [file join [temporaryDirectory] wsw pkg_a bin wjunk2]] {} {}]
+test unixFile-1.10 {native brace glob while simplefs:/ volume is mounted} -constraints {unix testsimplefilesystem} -setup {
+    file mkdir pkg_a/bin pkg_b/bin pkg_c/bin
+    makeFile "" pkg_a/bin/tool1
+    makeFile "" pkg_b/bin/tool2
+    makeFile "" pkg_c/bin/tool3
+    testsimplefilesystem 1
+} -body {
+    set nativeRes [lsort [glob -nocomplain [pwd]/{pkg_a,pkg_b}/bin/*]]
+    set vfsRes [glob -nocomplain simplefs:/pkg_a/bin/*]
+    set mixedRes [lsort [glob -nocomplain {{simplefs:/pkg_a,pkg_b}/bin/*}]]
+    list $nativeRes $vfsRes $mixedRes
+} -cleanup {
+    catch {testsimplefilesystem 0}
+    removeFile pkg_a/bin/tool1
+    removeFile pkg_b/bin/tool2
+    removeFile pkg_c/bin/tool3
+    file delete -force pkg_a pkg_b pkg_c
+} -result [list [list [file join [temporaryDirectory] pkg_a bin tool1] [file join [temporaryDirectory] pkg_b bin tool2]] {simplefs:/pkg_a/bin/tool1} {pkg_b/bin/tool2 simplefs:/pkg_a/bin/tool1}]
+test unixFile-1.11 {unclosed brace errors and literal braces in -directory} -constraints {unix} -setup {
+    set braceDir [file join [temporaryDirectory] {dir{1,2}}]
+    file mkdir $braceDir
+    close [open [file join $braceDir alpha.txt] w]
+    close [open [file join $braceDir beta.txt] w]
+} -body {
+    set c1 [list [catch {glob [pwd]/pkg_\{unclosed} m1] $m1]
+    set c2 [list [catch {glob [pwd]/pkg_unclosed\}} m2] $m2]
+    set c3 [lsort [glob -nocomplain -tails -directory $braceDir {{alpha,beta}.txt}]]
+    list $c1 $c2 $c3
+} -cleanup {
+    file delete -force $braceDir
+} -result {{1 {unmatched open-brace in file name}} {1 {unmatched close-brace in file name}} {alpha.txt beta.txt}}
+test unixFile-1.12 {testReportingFilesystem intercepts brace multi-glob} -constraints {unix testfilesystem} -setup {
+    file mkdir pkg_a/bin pkg_b/bin
+    makeFile "" pkg_a/bin/r1
+    makeFile "" pkg_b/bin/r2
+} -body {
+    testfilesystem 1
+    set ::filesystemReport {}
+    set matches [lsort [glob -nocomplain pkg_{a,b}/bin/*]]
+    testfilesystem 0
+    list $matches [expr {[string first matchindirectory $::filesystemReport] >= 0}]
+} -cleanup {
+    while {![catch {testfilesystem 0}]} {}
+    unset -nocomplain ::filesystemReport
+    removeFile pkg_a/bin/r1
+    removeFile pkg_b/bin/r2
+    file delete -force pkg_a pkg_b
+} -result {{pkg_a/bin/r1 pkg_b/bin/r2} 1}
+test unixFile-1.13 {Tcl bracket semantics preserved for [!a], [^a], and [z-a]} -constraints {unix} -setup {
+    set bdir [file join [temporaryDirectory] bkt_sem]
+    file mkdir $bdir
+    foreach fn {!hit ^hit ahit bmiss} {
+        close [open [file join $bdir $fn] w]
+    }
+} -body {
+    set r1 [lsort [glob -nocomplain -tails -directory $bdir {[!a]*}]]
+    set r2 [lsort [glob -nocomplain -tails -directory $bdir {[^a]*}]]
+    set r3 [lsort [glob -nocomplain -tails -directory $bdir {{[!a]*,[^a]*}}]]
+    set r4 [lsort [glob -nocomplain -tails -directory $bdir {[b-a]*}]]
+    list $r1 $r2 $r3 $r4
+} -cleanup {
+    file delete -force $bdir
+} -result {{!hit ahit} {^hit ahit} {!hit ^hit ahit ahit} {ahit bmiss}}
+test unixFile-1.14 {multi-component glob with ~ subdirectory does not escape to HOME} -constraints {unix} -setup {
+    set tdir [file join [temporaryDirectory] tilde_escape]
+    set fakeHome [file join [temporaryDirectory] fake_home]
+    file mkdir "$tdir/~" "$tdir/a/~" $fakeHome
+    close [open "$tdir/~/local_only" w]
+    close [open "$tdir/a/~/deep_only" w]
+    close [open [file join $fakeHome victim] w]
+    set savedHome [expr {[info exists ::env(HOME)] ? $::env(HOME) : ""}]
+    set hadHome [info exists ::env(HOME)]
+    set ::env(HOME) $fakeHome
+} -body {
+    set g1 [lsort [glob -nocomplain -directory $tdir */*]]
+    set g2 [lsort [glob -nocomplain -directory $tdir */*/*]]
+    set g3 [lsort [glob -nocomplain -tails -directory $tdir */*]]
+    set f1 [lindex $g1 1]
+    set f2 [lindex $g2 0]
+    list [file normalize $f1] [file exists $f1] [file normalize $f2] [file exists $f2] $g3 [file exists [file join $fakeHome victim]]
+} -cleanup {
+    if {$hadHome} {
+        set ::env(HOME) $savedHome
+    } else {
+        unset -nocomplain ::env(HOME)
+    }
+    file delete -force $tdir $fakeHome
+} -result [list "[file normalize [file join [temporaryDirectory] tilde_escape]]/~/local_only" 1 "[file normalize [file join [temporaryDirectory] tilde_escape]]/a/~/deep_only" 1 {a/~ ~/local_only} 1]
 test unixFile-1.15 {auto_execok: colon always splits PATH, brackets are literal} -constraints {unix} -setup {
     auto_reset
     set cdir [file join [temporaryDirectory] "p:b" bin]
@@ -135,6 +225,88 @@ test unixFile-1.16 {auto_execok: backslash, braces, and [1] are literal in PATH}
     auto_reset
     file delete -force $bsdir [file join [temporaryDirectory] "lit\[1\]"] [file join [temporaryDirectory] "lit1"] [file join [temporaryDirectory] "br{a,b}"]
 } -result [list [list [file join [temporaryDirectory] "lit\[1\]" bin lit_cmd]] [list [file join [temporaryDirectory] "br{a,b}" pkg bin br_cmd]]]
+test unixFile-1.17 {trailing slash and double-slash non-directory pruning} -constraints {unix} -setup {
+    set sdir [file join [temporaryDirectory] slash_prune]
+    file mkdir [file join $sdir adir] [file join $sdir pkg_a bin]
+    close [open [file join $sdir afile] w]
+    close [open [file join $sdir pkg_a bin tool] w]
+} -body {
+    set r1 [lsort [glob -nocomplain "$sdir/a*/"]]
+    set r2 [lsort [glob -nocomplain -directory $sdir "a*/"]]
+    set r3 [lsort [glob -nocomplain -tails -directory $sdir "a*/"]]
+    set r4 [lsort [glob -nocomplain "$sdir/pkg_a//bin/*"]]
+    set r5 [glob -nocomplain "$sdir/\[a\]file/"]
+    list $r1 $r2 $r3 $r4 $r5
+} -cleanup {
+    file delete -force $sdir
+} -result [list [list "[file join [temporaryDirectory] slash_prune adir]/"] [list "[file join [temporaryDirectory] slash_prune adir]/"] {adir/} [list [file join [temporaryDirectory] slash_prune pkg_a bin tool]] {}]
+
+test unixFile-1.18 {patterns glob(3) reads differently keep Tcl's matching} -constraints {unix} -setup {
+    set gdir [file join [temporaryDirectory] glob_fallback]
+    file mkdir [file join $gdir s1] [file join $gdir s2]
+    foreach f [list s1/alpha s1/beta s1/été s1/a-b s2/alpha s2/xy \
+	    xy a\]x été ab\\ !z] {
+	close [open [file join $gdir $f] w]
+    }
+} -body {
+    set r {}
+    foreach pat [list "é*" "s*/é*" {[[:alpha:]]*} {[\x]y} "ab\\" \
+	    {s*/[a-c]*} {s*/[[:alpha:]]*} {s*\/al*} {s*/{[a]lpha,xy}} \
+	    {s*/[!b]*}] {
+	lappend r [lsort [glob -nocomplain -tails -directory $gdir $pat]]
+    }
+    set r
+} -cleanup {
+    file delete -force $gdir
+} -result [list été s1/été {a\]x} xy {} {s1/a-b s1/alpha s1/beta s2/alpha} {} {s1/alpha s2/alpha} {s1/alpha s2/alpha s2/xy} s1/beta]
+test unixFile-1.19 {-types with braced patterns and with Tcl's matching} -constraints {unix} -setup {
+    set gdir [file join [temporaryDirectory] glob_types]
+    file mkdir [file join $gdir s1] [file join $gdir s2] [file join $gdir s3 alpha]
+    foreach f {s1/alpha s1/beta s2/alpha s2/xy !z .!z .hid} {
+	close [open [file join $gdir $f] w]
+    }
+} -body {
+    list [lsort [glob -nocomplain -tails -types f -directory $gdir {{s1,s3}/*}]] \
+	[lsort [glob -nocomplain -tails -types f -directory $gdir {s*/{alpha,xy}}]] \
+	[lsort [glob -nocomplain -tails -directory $gdir {s*/{alpha,xy}}]] \
+	[lsort [glob -nocomplain -tails -types f -directory $gdir {[!q]*}]] \
+	[lsort [glob -nocomplain -tails -directory $gdir {.[!q]*}]]
+} -cleanup {
+    file delete -force $gdir
+} -result {{s1/alpha s1/beta} {s1/alpha s2/alpha s2/xy} {s1/alpha s2/alpha s2/xy s3/alpha} !z .!z}
+test unixFile-1.20 {glob of an unreadable directory, through glob(3) and Tcl} -constraints {unix notRoot} -setup {
+    set gdir [file join [temporaryDirectory] glob_locked]
+    file mkdir $gdir
+    file attributes $gdir -permissions 0
+} -body {
+    list [catch {glob -directory $gdir *} m1] $m1 \
+	[catch {glob -directory $gdir {[!a]*}} m2] $m2
+} -cleanup {
+    file attributes $gdir -permissions 0o755
+    file delete -force $gdir
+} -result [list 1 "couldn't read directory \"[file join [temporaryDirectory] glob_locked]/\": permission denied" 1 "couldn't read directory \"[file join [temporaryDirectory] glob_locked]/\": permission denied"]
+test unixFile-1.21 {relative multi-component glob while simplefs:/ is mounted} -constraints {unix testsimplefilesystem} -setup {
+    set gdir [file join [temporaryDirectory] glob_vfs]
+    file mkdir [file join $gdir s1 sub] [file join $gdir s2]
+    foreach f {s1/alpha s2/alpha s1/sub/xfile} {
+	close [open [file join $gdir $f] w]
+    }
+    set savedPwd [pwd]
+    cd $gdir
+    testsimplefilesystem 1
+} -body {
+    set r1 [lsort [glob -nocomplain {s*/al*}]]
+    set r2 [lsort [glob -nocomplain -directory simplefs:/ {s*/al*}]]
+    cd simplefs:/s1
+    set r3 [lsort [glob -nocomplain {s*/x*}]]
+    cd $gdir
+    list $r1 $r2 $r3
+} -cleanup {
+    cd $gdir
+    catch {testsimplefilesystem 0}
+    cd $savedPwd
+    file delete -force $gdir
+} -result {{s1/alpha s2/alpha} {simplefs:/s1/alpha simplefs:/s2/alpha} {}}
 
 # cleanup
 catch {set env(PATH) $oldPath}
