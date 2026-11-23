@@ -73,6 +73,68 @@ test unixFile-1.8.1 {Tcl_FindExecutable without PATH} -constraints {testfindexec
     unset env(PATH)
     testfindexecutable junk
 } -result $absPath
+test unixFile-1.9 {auto_execok wildcard PATH} -constraints {unix} -setup {
+    auto_reset
+    file mkdir wsw/pkg_b/bin wsw/pkg_a/bin wsw/.hidden/bin
+    file attributes [makeFile "" wsw/pkg_b/bin/wjunk2] -perm 0o777
+    file attributes [makeFile "" wsw/pkg_a/bin/wjunk2] -perm 0o777
+    file attributes [makeFile "" wsw/.hidden/bin/wjunk3] -perm 0o777
+} -body {
+    set env(PATH) [format "-bad_opt*:/unclosed%cbrace*:%s/wsw/pkg_*/bin" 123 [pwd]]
+    set r1 [auto_execok wjunk2]
+    auto_reset
+    set env(PATH) [format "-bad_opt*:/unclosed%cbrace*:%s/wsw/*/bin" 123 [pwd]]
+    set r2 [auto_execok wjunk2]
+    set r3 [auto_execok wjunk3]
+    auto_reset
+    set env(PATH) "[pwd]/*/*/bin"
+    list $r1 $r2 $r3 [auto_execok wjunk2]
+} -cleanup {
+    auto_reset
+    file delete -force wsw
+} -result [list {} [list [file join [temporaryDirectory] wsw pkg_a bin wjunk2]] {} {}]
+test unixFile-1.15 {auto_execok: colon always splits PATH, brackets are literal} -constraints {unix} -setup {
+    auto_reset
+    set cdir [file join [temporaryDirectory] "p:b" bin]
+    set ldir [file join [temporaryDirectory] "p\[a\]b" bin]
+    file mkdir $cdir $ldir
+    foreach d [list $cdir $ldir] {
+	set exe [file join $d bktcolon_cmd]
+	close [open $exe w]
+	file attributes $exe -perm 0o755
+    }
+} -body {
+    set env(PATH) [file join [temporaryDirectory] {p[a:]b} bin]
+    set r1 [auto_execok bktcolon_cmd]
+    auto_reset
+    set env(PATH) [format {[[:alpha]:%s:[[:digit:]]} [file join [temporaryDirectory] {p[a]b} bin]]
+    set r2 [auto_execok bktcolon_cmd]
+    auto_reset
+    set env(PATH) [file join [temporaryDirectory] {p[ab]b} bin]
+    list $r1 $r2 [auto_execok bktcolon_cmd]
+} -cleanup {
+    auto_reset
+    file delete -force [file join [temporaryDirectory] "p:b"] [file join [temporaryDirectory] "p\[a\]b"]
+} -result [list {} [list [file join [temporaryDirectory] "p\[a\]b" bin bktcolon_cmd]] {}]
+test unixFile-1.16 {auto_execok: backslash, braces, and [1] are literal in PATH} -constraints {unix} -setup {
+    auto_reset
+    set bsdir [file join [temporaryDirectory] "dir_bs\\"]
+    set litbr [file join [temporaryDirectory] "lit\[1\]" bin]
+    set lit1  [file join [temporaryDirectory] "lit1" bin]
+    set brdir [file join [temporaryDirectory] "br{a,b}" pkg bin]
+    file mkdir $bsdir $litbr $lit1 $brdir
+    foreach {d cmd} [list $litbr lit_cmd $brdir br_cmd] {
+        set exe [file join $d $cmd]
+        close [open $exe w]
+        file attributes $exe -perm 0o755
+    }
+} -body {
+    set env(PATH) "${bsdir}:${litbr}:[file join [temporaryDirectory] {br{a,b}} * bin]"
+    list [auto_execok lit_cmd] [auto_execok br_cmd]
+} -cleanup {
+    auto_reset
+    file delete -force $bsdir [file join [temporaryDirectory] "lit\[1\]"] [file join [temporaryDirectory] "lit1"] [file join [temporaryDirectory] "br{a,b}"]
+} -result [list [list [file join [temporaryDirectory] "lit\[1\]" bin lit_cmd]] [list [file join [temporaryDirectory] "br{a,b}" pkg bin br_cmd]]]
 
 # cleanup
 catch {set env(PATH) $oldPath}
