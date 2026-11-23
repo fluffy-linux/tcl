@@ -66,9 +66,26 @@ namespace eval tcl {
 	    lappend ::auto_path $Dir
 	}
 	if {[info exists ::tcl_pkgPath]} { catch {
-	    foreach Dir $::tcl_pkgPath {
-		if {$Dir ni $::auto_path} {
-		    lappend ::auto_path $Dir
+	    foreach Pattern $::tcl_pkgPath {
+		if {![file isdirectory $Pattern]
+			&& ([string first * $Pattern] >= 0
+			    || [string first ? $Pattern] >= 0
+			    || [string first "\[" $Pattern] >= 0)} {
+		    set GPat [string map {\\ \\\\ \{ \\{ \} \\}} $Pattern]
+		    if {[string index $GPat 0] eq "~"} {
+			set GPat "\\$GPat"
+		    }
+		    if {![catch {glob -nocomplain -types d -- $GPat} Dirs]} {
+			foreach Dir [lsort -ascii $Dirs] {
+			    if {$Dir ni $::auto_path} {
+				lappend ::auto_path $Dir
+			    }
+			}
+		    }
+		} else {
+		    if {$Pattern ni $::auto_path} {
+			lappend ::auto_path $Pattern
+		    }
 		}
 	    }
 	}}
