@@ -728,14 +728,41 @@ proc auto_execok name {
 	}
 	return $auto_execs($name)
     }
-    foreach dir [split $env(PATH) :] {
-	if {$dir eq ""} {
-	    set dir .
+    # The search-list rule shared with execvp and glob (GLOB_PATHS): split
+    # on every ":", an empty element is ".", and a path component that is
+    # exactly "*" (at most one per element) stands for each entry of that
+    # directory not starting with ".", in byte order.  Every other
+    # character is literal.
+    foreach elem [split $env(PATH) :] {
+	if {$elem eq ""} {
+	    set elem .
 	}
-	set file [file join $dir $name]
-	if {[file executable $file] && ![file isdirectory $file]} {
-	    set auto_execs($name) [list $file]
-	    return $auto_execs($name)
+	set parts [split $elem /]
+	set star [lsearch -all -exact $parts *]
+	if {[llength $star] == 0} {
+	    set dirs [list $elem]
+	} elseif {[llength $star] > 1} {
+	    continue
+	} else {
+	    set base [join [lrange $parts 0 $star-1] /]
+	    if {$star == 0} {
+		set base .
+	    } elseif {$base eq ""} {
+		set base /
+	    } elseif {[string index $base 0] eq "~"} {
+		set base ./$base
+	    }
+	    set dirs {}
+	    foreach entry [lsort [glob -nocomplain -tails -directory $base -- *]] {
+		lappend dirs [join [lreplace $parts $star $star $entry] /]
+	    }
+	}
+	foreach dir $dirs {
+	    set file [file join $dir $name]
+	    if {[file executable $file] && ![file isdirectory $file]} {
+		set auto_execs($name) [list $file]
+		return $auto_execs($name)
+	    }
 	}
     }
     return ""
