@@ -12,6 +12,11 @@
 
 #include "tclInt.h"
 #include "tclFileSystem.h"
+#include <glob.h>
+#include <paths.h>
+#ifndef GLOB_PATHS
+#define GLOB_PATHS (1 << 29)
+#endif
 
 static int NativeMatchType(Tcl_Interp *interp, const char* nativeEntry,
 	const char* nativeName, Tcl_GlobTypeData *types);
@@ -83,7 +88,7 @@ TclpFindExecutable(
 	 * by sh.
 	 */
 
-	p = ":/bin:/usr/bin";
+	p = ":" _PATH_DEFPATH;
     } else if (*p == '\0') {
 	/*
 	 * An empty path is equivalent to ".".
@@ -97,41 +102,44 @@ TclpFindExecutable(
      * argv[0] is in one of them. If so, use that file name.
      */
 
-    while (1) {
-	while (TclIsSpaceProcM(*p)) {
-	    p++;
-	}
-	name = p;
-	while ((*p != ':') && (*p != 0)) {
-	    p++;
-	}
-	TclDStringClear(&buffer);
-	if (p != name) {
-	    Tcl_DStringAppend(&buffer, name, p - name);
-	    if (p[-1] != '/') {
-		TclDStringAppendLiteral(&buffer, "/");
+    {
+	glob_t g;
+	size_t i;
+
+	memset(&g, 0, sizeof(g));
+	if (glob(p, GLOB_PATHS, NULL, &g) == 0) {
+	    for (i = 0; i < g.gl_pathc; i++) {
+		const char *dir = g.gl_pathv[i];
+
+		while (TclIsSpaceProcM(*dir)) {
+		    dir++;
+		}
+		TclDStringClear(&buffer);
+		if (*dir != '\0' && !(dir[0] == '.' && dir[1] == '\0')) {
+		    size_t dlen = strlen(dir);
+
+		    Tcl_DStringAppend(&buffer, dir, (int)dlen);
+		    if (dir[dlen - 1] != '/') {
+			TclDStringAppendLiteral(&buffer, "/");
+		    }
+		}
+		name = Tcl_DStringAppend(&buffer, argv0, -1);
+
+		/*
+		 * INTL: The following calls to access() and stat() should not
+		 * be converted to Tclp routines because they need to operate
+		 * on native strings directly.
+		 */
+
+		if ((access(name, X_OK) == 0)		/* INTL: Native. */
+			&& (TclOSstat(name, &statBuf) == 0) /* INTL: Native. */
+			&& S_ISREG(statBuf.st_mode)) {
+		    globfree(&g);
+		    goto gotName;
+		}
 	    }
 	}
-	name = Tcl_DStringAppend(&buffer, argv0, -1);
-
-	/*
-	 * INTL: The following calls to access() and stat() should not be
-	 * converted to Tclp routines because they need to operate on native
-	 * strings directly.
-	 */
-
-	if ((access(name, X_OK) == 0)			/* INTL: Native. */
-		&& (TclOSstat(name, &statBuf) == 0)	/* INTL: Native. */
-		&& S_ISREG(statBuf.st_mode)) {
-	    goto gotName;
-	}
-	if (p[0] == '\0') {
-	    break;
-	} else if (p[1] == 0) {
-	    p = "./";
-	} else {
-	    p++;
-	}
+	globfree(&g);
     }
     TclNewObj(obj);
     TclSetObjNameOfExecutable(obj, NULL);
