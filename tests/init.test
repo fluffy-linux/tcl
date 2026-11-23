@@ -237,6 +237,21 @@ test init-5.0 {return options passed through ::unknown} -setup {
     unset ::auto_index(::xxx)
 } -match glob -result {2 xxx {-errorcode NONE -code 1 -level 1} 2 xxx {-code 1 -level 1 -errorcode NONE}}
 
+test init-6.1 {tcl_pkgPath: wildcard entries add the directories they match} -setup {
+    set td [makeDirectory pkgpath]
+    file mkdir $td/b/lib $td/a/lib $td/.h/lib $td/lit
+    close [open $td/f.lib w]
+    set i [interp create]
+} -body {
+    $i eval [list set ::tcl_pkgPath [list $td/*/lib $td/lit $td/nomatch* ~nosuchuser*/lib]]
+    $i eval {set ::auto_path {}; source [file join $::tcl_library init.tcl]}
+    lrange [$i eval {set ::auto_path}] end-2 end
+} -cleanup {
+    interp delete $i
+    unset -nocomplain i td
+    removeDirectory pkgpath
+} -result [list [file join [temporaryDirectory] pkgpath a lib] [file join [temporaryDirectory] pkgpath b lib] [file join [temporaryDirectory] pkgpath lit]]
+
 cleanupTests
 }	;#  End of [interp eval $testInterp]
 
