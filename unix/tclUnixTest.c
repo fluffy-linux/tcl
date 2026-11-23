@@ -72,6 +72,7 @@ static Tcl_CmdProc TestgetdefencdirCmd;
 static Tcl_CmdProc TestgetopenfileCmd;
 static Tcl_CmdProc TestgotsigCmd;
 static Tcl_CmdProc TestsetdefencdirCmd;
+static Tcl_ObjCmdProc TestvolumefsCmd;
 static Tcl_FileProc TestFileHandlerProc;
 static void		AlarmHandler(int signum);
 
@@ -115,6 +116,8 @@ TclplatformtestInit(
     Tcl_CreateCommand(interp, "testalarm", TestalarmCmd,
 	    NULL, NULL);
     Tcl_CreateCommand(interp, "testgotsig", TestgotsigCmd,
+	    NULL, NULL);
+    Tcl_CreateObjCommand(interp, "testvolumefs", TestvolumefsCmd,
 	    NULL, NULL);
     return TCL_OK;
 }
@@ -778,6 +781,152 @@ TestchmodCmd(
     return TCL_OK;
 }
 
+/*
+ *----------------------------------------------------------------------
+ *
+ * TestvolumefsCmd --
+ *
+ *	This function implements the "testvolumefs" command, which mounts
+ *	and unmounts a filesystem whose one volume is an absolute native
+ *	path, as a VFS mounted on a directory is.  It is used to test that
+ *	[glob] keeps Tcl's own matching, which sees the mount, for a
+ *	directory at or above such a volume (TclFSPatternIsNative), rather
+ *	than handing the pattern to glob(3), which sees only the disk.
+ *
+ *	"testvolumefs <dir>" mounts the volume at <dir> (absolute and
+ *	normalized, at most one at a time); "testvolumefs {}" unmounts it.
+ *	The volume holds one file, "vfile", whatever is on the disk there.
+ *
+ * Results:
+ *	A standard Tcl result.
+ *
+ * Side effects:
+ *	Registers or unregisters the filesystem.
+ *
+ *----------------------------------------------------------------------
+ */
+
+static Tcl_Obj *volumeFsMount = NULL;	/* The volume, or NULL. */
+
+static int
+VolumeFsContains(
+    Tcl_Obj *pathPtr)		/* Normalized path. */
+{
+    int len, mlen;
+    const char *str = Tcl_GetStringFromObj(pathPtr, &len);
+    const char *mount = Tcl_GetStringFromObj(volumeFsMount, &mlen);
+
+    return len >= mlen && strncmp(str, mount, (size_t) mlen) == 0
+	    && (str[mlen] == '\0' || str[mlen] == '/');
+}
+
+static int
+VolumeFsPathInFilesystem(
+    Tcl_Obj *pathPtr,
+    ClientData *clientDataPtr)
+{
+    Tcl_Obj *normPtr;
+
+    if (volumeFsMount == NULL) {
+	return -1;
+    }
+    normPtr = Tcl_FSGetNormalizedPath(NULL, pathPtr);
+    if (normPtr == NULL || !VolumeFsContains(normPtr)) {
+	return -1;
+    }
+    return TCL_OK;
+}
+
+static Tcl_Obj *
+VolumeFsListVolumes(void)
+{
+    Tcl_Obj *retVal = Tcl_DuplicateObj(volumeFsMount);
+
+    Tcl_IncrRefCount(retVal);
+    return retVal;
+}
+
+static int
+VolumeFsMatchInDirectory(
+    Tcl_Interp *interp,		/* Not used. */
+    Tcl_Obj *resultPtr,		/* Object to lappend results. */
+    Tcl_Obj *dirPtr,		/* Directory to search. */
+    const char *pattern,	/* Pattern to match against. */
+    Tcl_GlobTypeData *types)	/* Acceptable types, or NULL. */
+{
+    Tcl_Obj *normPtr = Tcl_FSGetNormalizedPath(NULL, dirPtr);
+    int len, mlen, plen;
+    const char *str, *mount, *slash;
+
+    if (normPtr == NULL || pattern == NULL) {
+	return TCL_OK;
+    }
+    str = Tcl_GetStringFromObj(normPtr, &len);
+    mount = Tcl_GetStringFromObj(volumeFsMount, &mlen);
+
+    if (types != NULL && (types->type & TCL_GLOB_TYPE_MOUNT)) {
+	/*
+	 * Tcl asks every filesystem for the mounts in a directory: list
+	 * the volume if this is its parent.
+	 */
+
+	slash = strrchr(mount, '/');
+	plen = (slash == mount) ? 1 : (int) (slash - mount);
+	if (len == plen && strncmp(str, mount, (size_t) plen) == 0
+		&& Tcl_StringMatch(slash + 1, pattern)) {
+	    Tcl_ListObjAppendElement(NULL, resultPtr,
+		    Tcl_DuplicateObj(volumeFsMount));
+	}
+	return TCL_OK;
+    }
+    if (len == mlen && strcmp(str, mount) == 0
+	    && Tcl_StringMatch("vfile", pattern)
+	    && (types == NULL || (types->type & ~TCL_GLOB_TYPE_FILE) == 0)) {
+	Tcl_Obj *tailPtr = Tcl_NewStringObj("vfile", -1);
+
+	Tcl_ListObjAppendElement(NULL, resultPtr,
+		Tcl_FSJoinToPath(dirPtr, 1, &tailPtr));
+    }
+    return TCL_OK;
+}
+
+static const Tcl_Filesystem volumeFilesystem = {
+    "testvolume",
+    sizeof(Tcl_Filesystem),
+    TCL_FILESYSTEM_VERSION_1,
+    VolumeFsPathInFilesystem,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    VolumeFsMatchInDirectory,
+    NULL, NULL,
+    VolumeFsListVolumes,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL
+};
+
+static int
+TestvolumefsCmd(
+    ClientData dummy,
+    Tcl_Interp *interp,
+    int objc,
+    Tcl_Obj *const objv[])
+{
+    if (objc != 2) {
+	Tcl_WrongNumArgs(interp, 1, objv, "dir");
+	return TCL_ERROR;
+    }
+    if (volumeFsMount != NULL) {
+	Tcl_FSUnregister(&volumeFilesystem);
+	Tcl_DecrRefCount(volumeFsMount);
+	volumeFsMount = NULL;
+    }
+    if (Tcl_GetString(objv[1])[0] != '\0') {
+	volumeFsMount = Tcl_DuplicateObj(objv[1]);
+	Tcl_IncrRefCount(volumeFsMount);
+	Tcl_FSRegister(NULL, &volumeFilesystem);
+    }
+    return TCL_OK;
+}
+
 /*
  * Local Variables:
  * mode: c

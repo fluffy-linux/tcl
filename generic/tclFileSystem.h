@@ -57,8 +57,12 @@ MODULE_SCOPE Tcl_PathType TclGetPathType(Tcl_Obj *pathPtr,
 			    int *driveNameLengthPtr, Tcl_Obj **driveNameRef);
 MODULE_SCOPE int	TclFSEpochOk(size_t filesystemEpoch);
 MODULE_SCOPE int	TclFSCwdIsNative(void);
+MODULE_SCOPE int	TclFSPatternIsNative(Tcl_Obj *pathPtr,
+			    const char *pattern);
 MODULE_SCOPE Tcl_Obj *	TclWinVolumeRelativeNormalize(Tcl_Interp *interp,
 			    const char *path, Tcl_Obj **useThisCwdPtr);
+
+#define TCL_GLOB_TYPE_BRACE	(1 << 15)
 
 MODULE_SCOPE Tcl_FSPathInFilesystemProc TclNativePathInFilesystem;
 MODULE_SCOPE Tcl_FSCreateInternalRepProc TclNativeCreateNativeRep;
