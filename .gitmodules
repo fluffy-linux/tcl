@@ -1,0 +1,27 @@
+[submodule "pkgs/itcl4.3.7"]
+	path = pkgs/itcl4.3.7
+	url = ../itcl.git
+[submodule "pkgs/sqlite3.53.0"]
+	path = pkgs/sqlite3.53.0
+	url = ../tclsqlite.git
+[submodule "pkgs/tclconfig"]
+	path = pkgs/tclconfig
+	url = ../tclconfig.git
+[submodule "pkgs/tdbc1.1.13"]
+	path = pkgs/tdbc1.1.13
+	url = ../tdbc.git
+[submodule "pkgs/tdbcmysql1.1.13"]
+	path = pkgs/tdbcmysql1.1.13
+	url = ../tdbcmysql.git
+[submodule "pkgs/tdbcodbc1.1.13"]
+	path = pkgs/tdbcodbc1.1.13
+	url = ../tdbcodbc.git
+[submodule "pkgs/tdbcpostgres1.1.13"]
+	path = pkgs/tdbcpostgres1.1.13
+	url = ../tdbcpostgres.git
+[submodule "pkgs/tdbcsqlite3-1.1.13"]
+	path = pkgs/tdbcsqlite3-1.1.13
+	url = ../tdbcsqlite3.git
+[submodule "pkgs/thread2.8.13"]
+	path = pkgs/thread2.8.13
+	url = ../thread.git
