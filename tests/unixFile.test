@@ -56,6 +56,23 @@ test unixFile-1.7 {Tcl_FindExecutable} {testfindexecutable unix} {
     set env(PATH) ":/dummy"
     testfindexecutable junk
 } $absPath
+test unixFile-1.8 {Tcl_FindExecutable wildcard PATH} -constraints {testfindexecutable unix} -setup {
+    file mkdir wsw/pkg_b/bin wsw/pkg_a/bin
+    file attributes [makeFile "" wsw/pkg_b/bin/wjunk] -perm 0o777
+    file attributes [makeFile "" wsw/pkg_a/bin/wjunk] -perm 0o777
+} -body {
+    set env(PATH) "/dummy:[pwd]/wsw/pkg_*/bin"
+    set r1 [testfindexecutable wjunk]
+    set env(PATH) "/dummy:[pwd]/wsw/*/bin"
+    list $r1 [testfindexecutable wjunk]
+} -cleanup {
+    file delete -force wsw
+} -result [list {} [file join [temporaryDirectory] wsw pkg_a bin wjunk]]
+test unixFile-1.8.1 {Tcl_FindExecutable without PATH} -constraints {testfindexecutable unix} -body {
+    # The C library's default path (_PATH_DEFPATH) is searched after ".".
+    unset env(PATH)
+    testfindexecutable junk
+} -result $absPath
 
 # cleanup
 catch {set env(PATH) $oldPath}
