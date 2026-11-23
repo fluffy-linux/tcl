@@ -1735,7 +1735,7 @@ configure-packages:
 		    mkdir -p $(PKG_DIR)/$$pkg; \
 		    if [ ! -f $(PKG_DIR)/$$pkg/Makefile ] ; then \
 			( cd $(PKG_DIR)/$$pkg; \
-			  $$i/configure --with-tcl=../.. \
+			  $(SHELL) $$i/configure --with-tcl=../.. \
 			      --with-tclinclude=$(GENERIC_DIR) \
 			      $(PKG_CFG_ARGS) --libdir=$(PACKAGE_DIR) \
 			      --enable-shared --enable-threads; ) || exit $$?; \
